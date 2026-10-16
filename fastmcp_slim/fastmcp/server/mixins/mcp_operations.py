@@ -145,7 +145,23 @@ class MCPOperationsMixin:
             tools = dedupe_with_versions(
                 list(await self.list_tools()), lambda t: t.name
             )
-            sdk_tools = [tool.to_mcp_tool(name=tool.name) for tool in tools]
+            sdk_tools = []
+            for tool in tools:
+                output_schema = tool.output_schema
+                if (
+                    ctx.protocol_version not in MODERN_PROTOCOL_VERSIONS
+                    and output_schema is not None
+                    and output_schema.get("type") != "object"
+                ):
+                    output_schema = {
+                        "type": "object",
+                        "properties": {"result": output_schema},
+                        "required": ["result"],
+                        "x-fastmcp-wrap-result": True,
+                    }
+                sdk_tools.append(
+                    tool.to_mcp_tool(name=tool.name, outputSchema=output_schema)
+                )
             cursor = params.cursor if params else None
             page, next_cursor = _apply_pagination(
                 sdk_tools, cursor, self._list_page_size
