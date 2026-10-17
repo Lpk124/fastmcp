@@ -2,26 +2,48 @@ from typing import Any
 
 import mcp_types
 import pytest
+from jsonschema import validate
 from mcp.server.context import ServerRequestContext
 from mcp.server.lowlevel.server import Server
 from mcp.server.transport_security import TransportSecuritySettings
 
 from fastmcp import Client, FastMCP
+from fastmcp.server.middleware.caching import ResponseCachingMiddleware
 from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider
 from fastmcp.utilities.asgi_transport import run_asgi_lifespan
 from fastmcp.utilities.tests import ASGIServer
 
 
 @pytest.mark.parametrize("mode", ["legacy", "auto"])
+@pytest.mark.parametrize("cache_results", [False, True])
 async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
     mode: str,
+    cache_results: bool,
 ) -> None:
     schemas = {
         "numbers": {"type": "array", "items": {"type": "integer"}},
         "flag": {"type": "boolean"},
         "record": {"type": "object", "properties": {"value": {"type": "integer"}}},
+        "matrix": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/row"},
+            "$defs": {"row": {"type": "array", "items": {"type": "integer"}}},
+        },
+        "choice": {
+            "oneOf": [
+                {"type": "object", "properties": {"value": {"type": "integer"}}},
+                {"type": "array", "items": {"type": "integer"}},
+            ]
+        },
     }
-    values = {"numbers": [1, 2, 3], "flag": False, "record": {"value": 1}}
+    values = {
+        "numbers": [1, 2, 3],
+        "flag": False,
+        "record": {"value": 1},
+        "matrix": [[1, 2]],
+        "choice": {"value": 2},
+    }
+    calls = {name: 0 for name in schemas}
 
     async def list_tools(
         ctx: ServerRequestContext[Any, Any],
@@ -42,6 +64,7 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         ctx: ServerRequestContext[Any, Any],
         params: mcp_types.CallToolRequestParams,
     ) -> mcp_types.CallToolResult:
+        calls[params.name] += 1
         value = values[params.name]
         return mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text=str(value))],
@@ -60,12 +83,29 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         proxy.add_provider(
             ProxyProvider(lambda: ProxyClient(upstream.transport(), mode="auto"))
         )
+        if cache_results:
+            proxy.add_middleware(ResponseCachingMiddleware())
 
         async with Client(proxy, mode=mode) as client:
             tools = {tool.name: tool for tool in await client.list_tools()}
             numbers = await client.call_tool("numbers", {})
             flag = await client.call_tool("flag", {})
             record = await client.call_tool("record", {})
+            matrix = await client.call_tool("matrix", {})
+            choice = await client.call_tool("choice", {})
+            if cache_results:
+                numbers_cached = await client.call_tool("numbers", {})
+                assert numbers_cached.structured_content == numbers.structured_content
+                assert calls["numbers"] == 1
+
+        if cache_results:
+            other_mode = "auto" if mode == "legacy" else "legacy"
+            async with Client(proxy, mode=other_mode) as other_client:
+                other_numbers = await other_client.call_tool("numbers", {})
+                assert other_numbers.structured_content == (
+                    [1, 2, 3] if mode == "legacy" else {"result": [1, 2, 3]}
+                )
+            assert calls["numbers"] == 2
 
     assert numbers.data == [1, 2, 3]
     assert flag.data is False
@@ -73,11 +113,14 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
     assert numbers.meta["source"] == "backend"
     assert flag.meta["source"] == "backend"
     assert record.structured_content == {"value": 1}
+    assert matrix.data == [[1, 2]]
+    assert choice.data == {"value": 2}
     assert tools["record"].output_schema == schemas["record"]
     if mode == "auto":
         assert tools["numbers"].output_schema == schemas["numbers"]
         assert numbers.structured_content == [1, 2, 3]
         assert flag.structured_content is False
+        assert choice.structured_content == {"value": 2}
     else:
         assert tools["numbers"].output_schema["type"] == "object"
         assert (
@@ -85,3 +128,5 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         )
         assert numbers.structured_content == {"result": [1, 2, 3]}
         assert flag.structured_content == {"result": False}
+        assert choice.structured_content == {"result": {"value": 2}}
+        validate(matrix.structured_content, tools["matrix"].output_schema)

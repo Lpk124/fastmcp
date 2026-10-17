@@ -142,6 +142,7 @@ class CacheableToolResult(FastMCPBaseModel):
     structured_content: dict[str, Any] | None
     meta: dict[str, Any] | None
     is_error: bool = False
+    raw_mcp_result: mcp_types.CallToolResult | None = None
 
     @classmethod
     def wrap(cls, value: ToolResult) -> Self:
@@ -150,15 +151,18 @@ class CacheableToolResult(FastMCPBaseModel):
             structured_content=value.structured_content,
             meta=value.meta,
             is_error=value.is_error,
+            raw_mcp_result=value._raw_mcp_result,
         )
 
     def unwrap(self) -> ToolResult:
-        return ToolResult(
+        result = ToolResult(
             content=self.content,
             structured_content=self.structured_content,
             meta=self.meta,
             is_error=self.is_error,
         )
+        result._raw_mcp_result = self.raw_mcp_result
+        return result
 
 
 class CacheableMessage(FastMCPBaseModel):
@@ -473,7 +477,12 @@ class ResponseCachingMiddleware(Middleware):
             return await call_next(context)
 
         cache_key: str = _make_call_tool_cache_key(
-            msg=context.message, auth_key=_get_auth_partition_key()
+            msg=context.message,
+            auth_key=_get_auth_partition_key(),
+            modern_protocol=(
+                context.fastmcp_context is not None
+                and context.fastmcp_context._is_modern_protocol()
+            ),
         )
 
         if cached_value := await self._call_tool_cache.get(key=cache_key):
@@ -683,12 +692,14 @@ def _get_component_version_cache_key(msg: mcp_types.RequestParams) -> str:
 
 
 def _make_call_tool_cache_key(
-    msg: mcp_types.CallToolRequestParams, auth_key: str = ANONYMOUS_AUTH_KEY
+    msg: mcp_types.CallToolRequestParams,
+    auth_key: str = ANONYMOUS_AUTH_KEY,
+    modern_protocol: bool = False,
 ) -> str:
-    """Make a cache key for a tool call using name, version, and arguments."""
+    """Make a cache key for a tool call using protocol era, name, version, and arguments."""
 
     return _hash_cache_key(
-        f"{auth_key}:{_get_component_version_cache_key(msg)}:{msg.name}:"
+        f"{auth_key}:{modern_protocol}:{_get_component_version_cache_key(msg)}:{msg.name}:"
         f"{_get_arguments_str(msg.arguments)}"
     )
 

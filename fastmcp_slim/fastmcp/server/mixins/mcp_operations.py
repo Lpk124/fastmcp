@@ -158,6 +158,13 @@ class MCPOperationsMixin:
                         "properties": {"result": output_schema},
                         "required": ["result"],
                         "x-fastmcp-wrap-result": True,
+                        # Local references inside the original schema still
+                        # resolve from the document root after wrapping.
+                        **(
+                            {"$defs": output_schema["$defs"]}
+                            if "$defs" in output_schema
+                            else {}
+                        ),
                     }
                 sdk_tools.append(
                     tool.to_mcp_tool(name=tool.name, outputSchema=output_schema)

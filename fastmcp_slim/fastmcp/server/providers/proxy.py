@@ -458,8 +458,13 @@ class ProxyTool(Tool):
             # and the client still raises on isError by default.
             # Preserve backend's meta (includes task metadata for background tasks)
             structured_content = tool_result.structured_content
-            if structured_content is not None and not isinstance(
-                structured_content, dict
+            if structured_content is not None and (
+                not isinstance(structured_content, dict)
+                or (
+                    not ctx._is_modern_protocol()
+                    and self.output_schema is not None
+                    and self.output_schema.get("type") != "object"
+                )
             ):
                 meta = dict(tool_result.meta or {})
                 fastmcp_meta = meta.get("fastmcp")
