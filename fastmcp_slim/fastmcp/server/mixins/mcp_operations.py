@@ -151,7 +151,7 @@ class MCPOperationsMixin:
                 output_schema = tool.output_schema
                 if (
                     ctx.protocol_version not in MODERN_PROTOCOL_VERSIONS
-                    and output_schema
+                    and output_schema is not None
                 ):
                     if _is_object_schema(output_schema) and "type" not in output_schema:
                         # An implicit object schema is valid JSON Schema, but

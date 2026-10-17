@@ -12,15 +12,20 @@ from fastmcp import Client, FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.server.middleware.caching import ResponseCachingMiddleware
 from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider, ProxyTool
+from fastmcp.server.transforms.tool_transform import ToolTransform
+from fastmcp.tools.base import RawStructuredToolResult, Tool, ToolResult
+from fastmcp.tools.tool_transform import ToolTransformConfig
 from fastmcp.utilities.asgi_transport import run_asgi_lifespan
 from fastmcp.utilities.tests import ASGIServer
 
 
 @pytest.mark.parametrize("mode", ["legacy", "auto"])
 @pytest.mark.parametrize("cache_results", [False, True])
+@pytest.mark.parametrize("transform_results", [False, True])
 async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
     mode: str,
     cache_results: bool,
+    transform_results: bool,
 ) -> None:
     schemas = {
         "numbers": {"type": "array", "items": {"type": "integer"}},
@@ -37,6 +42,7 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
             "definitions": {"row": {"type": "array", "items": {"type": "integer"}}},
         },
         "missing": None,
+        "unconstrained": {},
         "choice": {
             "oneOf": [
                 {"type": "object", "properties": {"value": {"type": "integer"}}},
@@ -51,6 +57,7 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         "matrix": [[1, 2]],
         "old_matrix": [[3, 4]],
         "choice": {"value": 2},
+        "unconstrained": {"value": 3},
     }
     calls = {name: 0 for name in schemas}
 
@@ -94,6 +101,11 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         proxy.add_provider(
             ProxyProvider(lambda: ProxyClient(upstream.transport(), mode="auto"))
         )
+        tool_name = "renamed_numbers" if transform_results else "numbers"
+        if transform_results:
+            proxy.add_transform(
+                ToolTransform({"numbers": ToolTransformConfig(name="renamed_numbers")})
+            )
 
         @proxy.tool(output_schema={"properties": {"value": {"type": "integer"}}})
         def plain_record() -> dict[str, int]:
@@ -104,23 +116,24 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
 
         async with Client(proxy, mode=mode) as client:
             tools = {tool.name: tool for tool in await client.list_tools()}
-            numbers = await client.call_tool("numbers", {})
+            numbers = await client.call_tool(tool_name, {})
             flag = await client.call_tool("flag", {})
             record = await client.call_tool("record", {})
             matrix = await client.call_tool("matrix", {})
             old_matrix = await client.call_tool("old_matrix", {})
             missing = await client.call_tool_mcp("missing", {})
             choice = await client.call_tool("choice", {})
+            unconstrained = await client.call_tool("unconstrained", {})
             plain = await client.call_tool("plain_record", {})
             if cache_results:
-                numbers_cached = await client.call_tool("numbers", {})
+                numbers_cached = await client.call_tool(tool_name, {})
                 assert numbers_cached.structured_content == numbers.structured_content
                 assert calls["numbers"] == 1
 
         if cache_results:
             other_mode = "auto" if mode == "legacy" else "legacy"
             async with Client(proxy, mode=other_mode) as other_client:
-                other_numbers = await other_client.call_tool("numbers", {})
+                other_numbers = await other_client.call_tool(tool_name, {})
                 assert other_numbers.structured_content == (
                     [1, 2, 3] if mode == "legacy" else {"result": [1, 2, 3]}
                 )
@@ -135,6 +148,7 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
     assert matrix.data == [[1, 2]]
     assert old_matrix.data == [[3, 4]]
     assert choice.data == {"value": 2}
+    assert unconstrained.data == {"value": 3}
     assert missing.structured_content is None
     assert plain.structured_content == {"value": 7}
     assert tools["plain_record"].output_schema == {
@@ -143,16 +157,20 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
     }
     assert tools["record"].output_schema == schemas["record"]
     if mode == "auto":
-        assert tools["numbers"].output_schema == schemas["numbers"]
+        assert tools[tool_name].output_schema == schemas["numbers"]
+        assert tools["unconstrained"].output_schema == {}
         assert numbers.structured_content == [1, 2, 3]
         assert flag.structured_content is False
         assert choice.structured_content == {"value": 2}
     else:
-        assert tools["numbers"].output_schema["type"] == "object"
+        assert tools[tool_name].output_schema["type"] == "object"
         assert (
-            tools["numbers"].output_schema["properties"]["result"] == schemas["numbers"]
+            tools[tool_name].output_schema["properties"]["result"] == schemas["numbers"]
         )
+        assert tools["unconstrained"].output_schema["type"] == "object"
+        assert tools["unconstrained"].output_schema["properties"]["result"] == {}
         assert numbers.structured_content == {"result": [1, 2, 3]}
+        assert unconstrained.structured_content == {"result": {"value": 3}}
         assert flag.structured_content == {"result": False}
         assert choice.structured_content == {"result": {"value": 2}}
         validate(matrix.structured_content, tools["matrix"].output_schema)
@@ -249,3 +267,60 @@ async def test_legacy_proxy_wraps_explicit_null_from_backend_model() -> None:
             result = await client.call_tool_mcp("nullable", {})
 
     assert result.structured_content == {"result": None}
+
+
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+@pytest.mark.parametrize("transform_results", [False, True])
+@pytest.mark.parametrize("raw_output", [False, True])
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {},
+        {
+            "oneOf": [
+                {"type": "object", "properties": {"value": {"type": "integer"}}},
+                {"type": "array", "items": {"type": "integer"}},
+            ]
+        },
+    ],
+)
+async def test_custom_tool_result_matches_legacy_advertised_wrapper(
+    mode: str,
+    transform_results: bool,
+    raw_output: bool,
+    schema: dict[str, Any],
+) -> None:
+    class CustomTool(Tool):
+        async def run(self, arguments: dict[str, Any]) -> ToolResult:
+            if raw_output:
+                return RawStructuredToolResult(content=[], structured_content=[1])
+            return self.convert_result({"value": 1})
+
+    server = FastMCP("custom")
+    server.add_tool(
+        CustomTool(
+            name="custom",
+            parameters={"type": "object", "properties": {}},
+            output_schema=schema,
+        )
+    )
+    tool_name = "renamed_custom" if transform_results else "custom"
+    if transform_results:
+        server.add_transform(
+            ToolTransform({"custom": ToolTransformConfig(name=tool_name)})
+        )
+
+    direct = await server.call_tool(tool_name, {})
+    expected = [1] if raw_output else {"value": 1}
+    assert direct.structured_content == expected
+
+    async with Client(server, mode=mode) as client:
+        advertised = (await client.list_tools())[0].output_schema
+        result = await client.call_tool_mcp(tool_name, {})
+
+    if mode == "legacy":
+        assert advertised["properties"]["result"] == schema
+        assert result.structured_content == {"result": expected}
+    else:
+        assert advertised == schema
+        assert result.structured_content == expected
