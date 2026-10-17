@@ -63,7 +63,13 @@ from fastmcp.server.providers.aggregate import ProviderErrorStrategy
 from fastmcp.server.providers.base import Provider
 from fastmcp.server.server import FastMCP
 from fastmcp.telemetry import inject_trace_context
-from fastmcp.tools.base import InputRequiredToolResult, Tool, ToolResult
+from fastmcp.tools.base import (
+    InputRequiredToolResult,
+    RawStructuredToolResult,
+    Tool,
+    ToolResult,
+)
+from fastmcp.tools.function_parsing import _is_object_schema
 from fastmcp.utilities.components import FastMCPComponent, get_fastmcp_metadata
 from fastmcp.utilities.logging import get_logger
 from fastmcp.utilities.tasks import TaskConfig
@@ -458,12 +464,30 @@ class ProxyTool(Tool):
             # and the client still raises on isError by default.
             # Preserve backend's meta (includes task metadata for background tasks)
             structured_content = tool_result.structured_content
-            if structured_content is not None and (
-                not isinstance(structured_content, dict)
-                or (
-                    not ctx._is_modern_protocol()
-                    and self.output_schema is not None
-                    and self.output_schema.get("type") != "object"
+            has_structured_content = (
+                "structured_content" in tool_result.model_fields_set
+            )
+            if (
+                ctx._is_modern_protocol()
+                and has_structured_content
+                and not isinstance(structured_content, dict)
+            ):
+                return RawStructuredToolResult(
+                    content=tool_result.content,
+                    structured_content=structured_content,
+                    meta=tool_result.meta,
+                    is_error=tool_result.is_error,
+                )
+
+            if (
+                not ctx._is_modern_protocol()
+                and has_structured_content
+                and (
+                    not isinstance(structured_content, dict)
+                    or (
+                        self.output_schema is not None
+                        and not _is_object_schema(self.output_schema)
+                    )
                 )
             ):
                 meta = dict(tool_result.meta or {})
@@ -472,15 +496,12 @@ class ProxyTool(Tool):
                     **(fastmcp_meta if isinstance(fastmcp_meta, dict) else {}),
                     "wrap_result": True,
                 }
-                result = ToolResult(
+                return ToolResult(
                     content=tool_result.content,
                     structured_content={"result": structured_content},
                     meta=meta,
                     is_error=tool_result.is_error,
                 )
-                if ctx._is_modern_protocol():
-                    result._raw_mcp_result = tool_result
-                return result
 
             return ToolResult(
                 content=tool_result.content,

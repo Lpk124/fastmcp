@@ -34,7 +34,12 @@ from fastmcp.resources.base import (
 )
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.tools.base import InputRequiredToolResult, Tool, ToolResult
+from fastmcp.tools.base import (
+    InputRequiredToolResult,
+    RawStructuredToolResult,
+    Tool,
+    ToolResult,
+)
 from fastmcp.utilities.logging import get_logger
 from fastmcp.utilities.types import FastMCPBaseModel
 
@@ -139,10 +144,11 @@ class CacheableResourceResult(FastMCPBaseModel):
 
 class CacheableToolResult(FastMCPBaseModel):
     content: list[mcp_types.ContentBlock]
-    structured_content: dict[str, Any] | None
+    structured_content: Any
     meta: dict[str, Any] | None
     is_error: bool = False
     raw_mcp_result: mcp_types.CallToolResult | None = None
+    raw_structured_content: bool = False
 
     @classmethod
     def wrap(cls, value: ToolResult) -> Self:
@@ -152,10 +158,14 @@ class CacheableToolResult(FastMCPBaseModel):
             meta=value.meta,
             is_error=value.is_error,
             raw_mcp_result=value._raw_mcp_result,
+            raw_structured_content=isinstance(value, RawStructuredToolResult),
         )
 
     def unwrap(self) -> ToolResult:
-        result = ToolResult(
+        result_type = (
+            RawStructuredToolResult if self.raw_structured_content else ToolResult
+        )
+        result = result_type(
             content=self.content,
             structured_content=self.structured_content,
             meta=self.meta,

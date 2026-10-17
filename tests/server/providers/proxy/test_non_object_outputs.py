@@ -1,4 +1,5 @@
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import mcp_types
 import pytest
@@ -8,8 +9,9 @@ from mcp.server.lowlevel.server import Server
 from mcp.server.transport_security import TransportSecuritySettings
 
 from fastmcp import Client, FastMCP
+from fastmcp.server.middleware import Middleware
 from fastmcp.server.middleware.caching import ResponseCachingMiddleware
-from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider
+from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider, ProxyTool
 from fastmcp.utilities.asgi_transport import run_asgi_lifespan
 from fastmcp.utilities.tests import ASGIServer
 
@@ -29,6 +31,12 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
             "items": {"$ref": "#/$defs/row"},
             "$defs": {"row": {"type": "array", "items": {"type": "integer"}}},
         },
+        "old_matrix": {
+            "type": "array",
+            "items": {"$ref": "#/definitions/row"},
+            "definitions": {"row": {"type": "array", "items": {"type": "integer"}}},
+        },
+        "missing": None,
         "choice": {
             "oneOf": [
                 {"type": "object", "properties": {"value": {"type": "integer"}}},
@@ -41,6 +49,7 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         "flag": False,
         "record": {"value": 1},
         "matrix": [[1, 2]],
+        "old_matrix": [[3, 4]],
         "choice": {"value": 2},
     }
     calls = {name: 0 for name in schemas}
@@ -65,6 +74,8 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         params: mcp_types.CallToolRequestParams,
     ) -> mcp_types.CallToolResult:
         calls[params.name] += 1
+        if params.name == "missing":
+            return mcp_types.CallToolResult(content=[])
         value = values[params.name]
         return mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text=str(value))],
@@ -83,6 +94,11 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         proxy.add_provider(
             ProxyProvider(lambda: ProxyClient(upstream.transport(), mode="auto"))
         )
+
+        @proxy.tool(output_schema={"properties": {"value": {"type": "integer"}}})
+        def plain_record() -> dict[str, int]:
+            return {"value": 7}
+
         if cache_results:
             proxy.add_middleware(ResponseCachingMiddleware())
 
@@ -92,7 +108,10 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
             flag = await client.call_tool("flag", {})
             record = await client.call_tool("record", {})
             matrix = await client.call_tool("matrix", {})
+            old_matrix = await client.call_tool("old_matrix", {})
+            missing = await client.call_tool_mcp("missing", {})
             choice = await client.call_tool("choice", {})
+            plain = await client.call_tool("plain_record", {})
             if cache_results:
                 numbers_cached = await client.call_tool("numbers", {})
                 assert numbers_cached.structured_content == numbers.structured_content
@@ -114,7 +133,14 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
     assert flag.meta["source"] == "backend"
     assert record.structured_content == {"value": 1}
     assert matrix.data == [[1, 2]]
+    assert old_matrix.data == [[3, 4]]
     assert choice.data == {"value": 2}
+    assert missing.structured_content is None
+    assert plain.structured_content == {"value": 7}
+    assert tools["plain_record"].output_schema == {
+        **({"type": "object"} if mode == "legacy" else {}),
+        "properties": {"value": {"type": "integer"}},
+    }
     assert tools["record"].output_schema == schemas["record"]
     if mode == "auto":
         assert tools["numbers"].output_schema == schemas["numbers"]
@@ -130,3 +156,96 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         assert flag.structured_content == {"result": False}
         assert choice.structured_content == {"result": {"value": 2}}
         validate(matrix.structured_content, tools["matrix"].output_schema)
+        validate(old_matrix.structured_content, tools["old_matrix"].output_schema)
+
+
+async def test_modern_proxy_middleware_edits_reach_clients_and_cache() -> None:
+    observed: list[Any] = []
+    backend_calls = 0
+
+    async def list_tools(
+        ctx: ServerRequestContext[Any, Any],
+        params: mcp_types.PaginatedRequestParams | None,
+    ) -> mcp_types.ListToolsResult:
+        return mcp_types.ListToolsResult(
+            tools=[
+                mcp_types.Tool(
+                    name="numbers",
+                    input_schema={"type": "object"},
+                    output_schema={"type": "array", "items": {"type": "integer"}},
+                )
+            ]
+        )
+
+    async def call_tool(
+        ctx: ServerRequestContext[Any, Any],
+        params: mcp_types.CallToolRequestParams,
+    ) -> mcp_types.CallToolResult:
+        nonlocal backend_calls
+        backend_calls += 1
+        return mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text="original")],
+            structured_content=[1, 2, 3],
+            _meta={"source": "backend"},
+        )
+
+    class RedactMiddleware(Middleware):
+        async def on_call_tool(self, context, call_next):
+            result = await call_next(context)
+            observed.append(result.structured_content)
+            return result.model_copy(update={"structured_content": [9]})
+
+    backend = Server("backend", on_list_tools=list_tools, on_call_tool=call_tool)
+    app = backend.streamable_http_app(
+        stateless_http=True,
+        transport_security=TransportSecuritySettings(allowed_hosts=["127.0.0.1"]),
+    )
+    async with run_asgi_lifespan(app):
+        upstream = ASGIServer("http://127.0.0.1/mcp", app, "http")
+        proxy = FastMCP("proxy")
+        proxy.add_provider(
+            ProxyProvider(lambda: ProxyClient(upstream.transport(), mode="auto"))
+        )
+        proxy.add_middleware(ResponseCachingMiddleware())
+        proxy.add_middleware(RedactMiddleware())
+
+        async with Client(proxy, mode="auto") as client:
+            first = await client.call_tool("numbers", {})
+            cached = await client.call_tool("numbers", {})
+
+    assert observed == [[1, 2, 3]]
+    assert first.structured_content == [9]
+    assert cached.structured_content == [9]
+    assert first.meta["source"] == "backend"
+    assert backend_calls == 1
+
+
+async def test_legacy_proxy_wraps_explicit_null_from_backend_model() -> None:
+    # The SDK currently omits null fields during wire serialization, so
+    # inject the backend model directly to exercise presence detection.
+    explicit_null = mcp_types.CallToolResult(content=[], structured_content=None)
+    absent = mcp_types.CallToolResult(content=[])
+    assert "structured_content" in explicit_null.model_fields_set
+    assert "structured_content" not in absent.model_fields_set
+
+    backend = FastMCP("backend")
+    proxy = FastMCP("proxy")
+    proxy.add_tool(
+        ProxyTool(
+            client_factory=lambda: ProxyClient(backend, mode="legacy"),
+            name="nullable",
+            parameters={"type": "object"},
+            output_schema={"type": "null"},
+        )
+    )
+
+    with patch.object(
+        ProxyClient,
+        "call_tool_mcp",
+        new_callable=AsyncMock,
+        return_value=explicit_null,
+    ):
+        async with Client(proxy, mode="legacy") as client:
+            result = await client.call_tool_mcp("nullable", {})
+
+    assert result.structured_content == {"result": None}
