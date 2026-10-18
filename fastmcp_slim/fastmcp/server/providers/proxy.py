@@ -467,39 +467,17 @@ class ProxyTool(Tool):
             has_structured_content = (
                 "structured_content" in tool_result.model_fields_set
             )
-            if (
-                ctx._is_modern_protocol()
-                and has_structured_content
-                and not isinstance(structured_content, dict)
+            if has_structured_content and (
+                not isinstance(structured_content, dict)
+                or (
+                    self.output_schema is not None
+                    and not _is_object_schema(self.output_schema)
+                )
             ):
                 return RawStructuredToolResult(
                     content=tool_result.content,
                     structured_content=structured_content,
                     meta=tool_result.meta,
-                    is_error=tool_result.is_error,
-                )
-
-            if (
-                not ctx._is_modern_protocol()
-                and has_structured_content
-                and (
-                    not isinstance(structured_content, dict)
-                    or (
-                        self.output_schema is not None
-                        and not _is_object_schema(self.output_schema)
-                    )
-                )
-            ):
-                meta = dict(tool_result.meta or {})
-                fastmcp_meta = meta.get("fastmcp")
-                meta["fastmcp"] = {
-                    **(fastmcp_meta if isinstance(fastmcp_meta, dict) else {}),
-                    "wrap_result": True,
-                }
-                return ToolResult(
-                    content=tool_result.content,
-                    structured_content={"result": structured_content},
-                    meta=meta,
                     is_error=tool_result.is_error,
                 )
 

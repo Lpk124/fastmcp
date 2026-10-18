@@ -147,7 +147,6 @@ class CacheableToolResult(FastMCPBaseModel):
     structured_content: Any
     meta: dict[str, Any] | None
     is_error: bool = False
-    raw_mcp_result: mcp_types.CallToolResult | None = None
     raw_structured_content: bool = False
 
     @classmethod
@@ -157,7 +156,6 @@ class CacheableToolResult(FastMCPBaseModel):
             structured_content=value.structured_content,
             meta=value.meta,
             is_error=value.is_error,
-            raw_mcp_result=value._raw_mcp_result,
             raw_structured_content=isinstance(value, RawStructuredToolResult),
         )
 
@@ -171,7 +169,6 @@ class CacheableToolResult(FastMCPBaseModel):
             meta=self.meta,
             is_error=self.is_error,
         )
-        result._raw_mcp_result = self.raw_mcp_result
         return result
 
 

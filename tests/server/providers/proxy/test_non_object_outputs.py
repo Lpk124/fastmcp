@@ -111,6 +111,11 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         def plain_record() -> dict[str, int]:
             return {"value": 7}
 
+        @proxy.tool
+        async def nested_numbers() -> dict[str, Any]:
+            result = await proxy.call_tool(tool_name, {})
+            return {"value": result.structured_content}
+
         if cache_results:
             proxy.add_middleware(ResponseCachingMiddleware())
 
@@ -125,6 +130,7 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
             choice = await client.call_tool("choice", {})
             unconstrained = await client.call_tool("unconstrained", {})
             plain = await client.call_tool("plain_record", {})
+            nested = await client.call_tool("nested_numbers", {})
             if cache_results:
                 numbers_cached = await client.call_tool(tool_name, {})
                 assert numbers_cached.structured_content == numbers.structured_content
@@ -151,6 +157,7 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
     assert unconstrained.data == {"value": 3}
     assert missing.structured_content is None
     assert plain.structured_content == {"value": 7}
+    assert nested.structured_content == {"value": [1, 2, 3]}
     assert tools["plain_record"].output_schema == {
         **({"type": "object"} if mode == "legacy" else {}),
         "properties": {"value": {"type": "integer"}},
@@ -281,6 +288,10 @@ async def test_legacy_proxy_wraps_explicit_null_from_backend_model() -> None:
                 {"type": "object", "properties": {"value": {"type": "integer"}}},
                 {"type": "array", "items": {"type": "integer"}},
             ]
+        },
+        {
+            "type": ["object", "array"],
+            "properties": {"value": {"type": "integer"}},
         },
     ],
 )
