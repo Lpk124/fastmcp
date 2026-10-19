@@ -184,7 +184,8 @@ async def test_proxy_preserves_non_object_tool_outputs_across_protocol_versions(
         validate(old_matrix.structured_content, tools["old_matrix"].output_schema)
 
 
-async def test_modern_proxy_middleware_edits_reach_clients_and_cache() -> None:
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+async def test_proxy_middleware_edits_reach_clients_and_cache(mode: str) -> None:
     observed: list[Any] = []
     backend_calls = 0
 
@@ -234,13 +235,14 @@ async def test_modern_proxy_middleware_edits_reach_clients_and_cache() -> None:
         proxy.add_middleware(ResponseCachingMiddleware())
         proxy.add_middleware(RedactMiddleware())
 
-        async with Client(proxy, mode="auto") as client:
+        async with Client(proxy, mode=mode) as client:
             first = await client.call_tool("numbers", {})
             cached = await client.call_tool("numbers", {})
 
     assert observed == [[1, 2, 3]]
-    assert first.structured_content == [9]
-    assert cached.structured_content == [9]
+    expected = {"result": [9]} if mode == "legacy" else [9]
+    assert first.structured_content == expected
+    assert cached.structured_content == expected
     assert first.meta["source"] == "backend"
     assert backend_calls == 1
 

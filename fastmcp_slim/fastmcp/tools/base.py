@@ -191,7 +191,7 @@ class ToolResult(BaseModel):
 
 
 class RawStructuredToolResult(ToolResult):
-    """A proxied modern result whose structured value need not be an object."""
+    """A proxied result whose structured value need not be an object."""
 
     structured_content: Any = None
 
@@ -204,7 +204,7 @@ class RawStructuredToolResult(ToolResult):
     ) -> None:
         # The proxy already received wire-format content from the backend.
         # ToolResult's constructor intentionally rejects non-object values for
-        # ordinary tools, while modern MCP permits them for proxied tools.
+        # ordinary tools; the wire handler wraps these for legacy clients.
         BaseModel.__init__(
             self,
             content=content,
